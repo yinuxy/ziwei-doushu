@@ -67,15 +67,33 @@ jobs:
         run: |
           set -uo pipefail
           tag="sha-${{ steps.upstream.outputs.short }}"
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
+
+          # Docker Hub：公开 tag 查询接口
+          dh=$(curl -s -o /dev/null -w '%{http_code}' \
             "https://hub.docker.com/v2/repositories/${IMAGE}/tags/${tag}")
-          echo "Docker Hub 查询 ${IMAGE}:${tag} -> HTTP ${code}"
-          if [ "$code" = "200" ] && [ "${{ inputs.force }}" != "true" ]; then
+          echo "Docker Hub  ${IMAGE}:${tag} -> HTTP ${dh}"
+
+          # GHCR：需先换匿名 pull token 再查 manifest
+          ghcr_token=$(curl -s \
+            "https://ghcr.io/token?scope=repository:yinuxy/ziwei-doushu:pull&service=ghcr.io" \
+            | python3 -c "import sys,json;print(json.load(sys.stdin).get('token',''))" 2>/dev/null || echo "")
+          if [ -n "$ghcr_token" ]; then
+            gh=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${ghcr_token}" \
+              -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" \
+              "https://ghcr.io/v2/${GHCR_IMAGE#ghcr.io/}/manifests/${tag}")
+          else
+            gh="000"
+          fi
+          echo "GHCR         ${GHCR_IMAGE}:${tag} -> HTTP ${gh}"
+
+          # 两个仓库都有才算发布完成；任一缺失就重建，避免单边失败后永远补不上
+          if [ "$dh" = "200" ] && [ "$gh" = "200" ] && [ "${{ inputs.force }}" != "true" ]; then
             echo "need=false" >> "$GITHUB_OUTPUT"
-            echo "该版本已发布，跳过构建"
+            echo "两个仓库均已有该版本，跳过构建"
           else
             echo "need=true" >> "$GITHUB_OUTPUT"
-            echo "需要构建新版本"
+            echo "需要构建（Docker Hub=${dh}, GHCR=${gh}）"
           fi
 
       - name: 合并上游变更到本仓库
