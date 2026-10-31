@@ -4,7 +4,7 @@
 # 直接拉取已发布镜像，不需要源码、不需要构建、不需要 Node 环境。
 #
 #   启动：  docker compose up -d
-#   访问：  http://localhost:3000
+#   访问：  http://localhost:8090
 #   状态：  docker compose ps
 #   日志：  docker compose logs -f
 #   停止：  docker compose down          （保留缓存卷）
@@ -12,21 +12,29 @@
 #   更新：  docker compose pull && docker compose up -d
 #
 # 镜像：https://hub.docker.com/r/yinuxy/ziwei-doushu
+#       https://github.com/yinuxy/ziwei-doushu/pkgs/container/ziwei-doushu
 # ============================================================
 
 name: ziwei-doushu
 
 services:
   web:
-    # 默认跑最新版；要锁版本就改成 yinuxy/ziwei-doushu:0.1.0
-    # 注意：改了标签必须 docker compose pull 才会真正拉新镜像
-    image: yinuxy/ziwei-doushu:${IMAGE_TAG:-latest}
+    # 镜像源二选一：
+    #   Docker Hub（默认）
+    #   GHCR：ghcr.io/yinuxy/ziwei-doushu —— 国内网络通常能直连，Docker Hub 可能被 DNS 污染
+    # 改了标签必须 docker compose pull 才会真正拉新镜像
+    image: ${IMAGE_REPO:-yinuxy/ziwei-doushu}:${IMAGE_TAG:-latest}
     container_name: ziwei-web
     restart: unless-stopped
 
     ports:
-      # 只想本机访问就保持 127.0.0.1；要让局域网访问改成 "3000:3000"
-      - "127.0.0.1:${HOST_PORT:-3000}:3000"
+      # ⚠️ Windows + Docker Desktop 注意：
+      # 端口不能落在系统保留区（Hyper-V/WinNAT 会动态占用）。
+      # 默认用 8090 就是为了避开这块；用 3000 会报
+      #   "bind: An attempt was made to access a socket in a way forbidden by its access permissions"
+      # 自查保留区：netsh interface ipv4 show excludedportrange protocol=tcp
+      # 只想本机访问就保持 127.0.0.1；要让局域网访问改成 "8090:3000"
+      - "127.0.0.1:${HOST_PORT:-8090}:3000"
 
     environment:
       NODE_ENV: production
@@ -84,8 +92,13 @@ volumes:
 #     web:
 #       image: yinuxy/ziwei-doushu:latest
 #       ports:
-#         - "3000:3000"
+#         - "8090:3000"
 #       restart: unless-stopped
+#
+# ------------------------------------------------------------
+# 拉不动 Docker Hub 时改用 GHCR 镜像：
+#
+#   IMAGE_REPO=ghcr.io/yinuxy/ziwei-doushu docker compose up -d
 #
 # ------------------------------------------------------------
 # 要用自己的域名 + HTTPS，在前面加一层 Caddy（自动签发证书）：
@@ -116,5 +129,5 @@ volumes:
 #     --build-arg NEXT_PUBLIC_SITE_URL=https://zw.example.com \
 #     -t ziwei-doushu:custom .
 #
-# 然后把上面 image: 改成 ziwei-doushu:custom
+# 然后把 image: 改成 ziwei-doushu:custom
 # ============================================================

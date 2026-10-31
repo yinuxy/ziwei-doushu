@@ -105,7 +105,7 @@ jobs:
         run: docker compose -f deploy/docker/docker-compose.local.yml ps
 
       - name: 路由冒烟验证
-        run: bash deploy/docker/verify.sh http://127.0.0.1:3000
+        run: bash deploy/docker/verify.sh http://127.0.0.1:8090
 
       - name: 验证加固项生效
         run: |
