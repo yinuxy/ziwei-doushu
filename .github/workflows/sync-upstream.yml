@@ -1,0 +1,159 @@
+name: Sync Upstream & Publish
+
+# 跟进上游 Renhuai123/ziwei-doushu 的更新，自动构建并发布新镜像。
+#
+# 原理：GitHub 无法监听他人仓库的 push，改为定时轮询上游 main 的 HEAD，
+# 用上游 commit 短 SHA 作为镜像标签。Docker Hub 上已存在该标签即视为已构建，
+# 直接跳过——因此本流程幂等，重复触发不会重复构建。
+#
+# 触发：
+#   1. 每小时自动检查（GitHub 定时任务在高峰期可能延迟几分钟）
+#   2. 手动触发，可选 force 强制重建
+#
+# 依赖 Secrets：DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
+# 可选 Variables：NEXT_PUBLIC_SITE_URL
+
+on:
+  schedule:
+    # 每小时整点检查上游是否有新提交
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制构建（忽略 Docker Hub 上已存在的同版本镜像）'
+        type: boolean
+        default: false
+
+# 同一时间只跑一个，避免并发导致重复推送
+concurrency:
+  group: sync-upstream-publish
+  cancel-in-progress: false
+
+env:
+  IMAGE: yinuxy/ziwei-doushu
+  UPSTREAM_REPO: https://github.com/Renhuai123/ziwei-doushu.git
+
+jobs:
+  sync-and-publish:
+    name: 同步上游并发布
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出本仓库（完整历史，便于合并上游）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 读取上游最新提交
+        id: upstream
+        run: |
+          set -euo pipefail
+          sha=$(git ls-remote "$UPSTREAM_REPO" refs/heads/main | awk '{print $1}')
+          if [ -z "$sha" ]; then
+            echo "无法读取上游 HEAD，中止"; exit 1
+          fi
+          short=$(echo "$sha" | cut -c1-7)
+          echo "sha=$sha"     >> "$GITHUB_OUTPUT"
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+          echo "上游 main HEAD: $sha  (镜像标签 sha-$short)"
+
+      - name: 判断该版本是否已构建
+        id: gate
+        run: |
+          set -uo pipefail
+          tag="sha-${{ steps.upstream.outputs.short }}"
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://hub.docker.com/v2/repositories/${IMAGE}/tags/${tag}")
+          echo "Docker Hub 查询 ${IMAGE}:${tag} -> HTTP ${code}"
+          if [ "$code" = "200" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "need=false" >> "$GITHUB_OUTPUT"
+            echo "该版本已发布，跳过构建"
+          else
+            echo "need=true" >> "$GITHUB_OUTPUT"
+            echo "需要构建新版本"
+          fi
+
+      - name: 合并上游变更到本仓库
+        if: steps.gate.outputs.need == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_REPO" 2>/dev/null || git remote set-url upstream "$UPSTREAM_REPO"
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "本仓库已包含上游最新提交，无需合并"
+          else
+            # 冲突时中止，不带着半合并状态去构建
+            git merge upstream/main --no-edit \
+              -m "chore: 同步上游 ${{ steps.upstream.outputs.short }}" \
+              || { echo "合并冲突，已中止"; git merge --abort; exit 1; }
+          fi
+
+      - name: 登录 Docker Hub
+        if: steps.gate.outputs.need == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 设置 Buildx
+        if: steps.gate.outputs.need == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建并推送
+        if: steps.gate.outputs.need == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:sha-${{ steps.upstream.outputs.short }}
+            ${{ env.IMAGE }}:latest
+          build-args: |
+            NEXT_PUBLIC_SITE_URL=${{ vars.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+          labels: |
+            org.opencontainers.image.title=紫微斗数排盘引擎
+            org.opencontainers.image.description=基于倪海厦《天纪》体系的紫微斗数排盘引擎（开源快照版）
+            org.opencontainers.image.source=https://github.com/Renhuai123/ziwei-doushu
+            org.opencontainers.image.revision=${{ steps.upstream.outputs.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: 将同步结果推回本仓库
+        if: steps.gate.outputs.need == 'true'
+        run: |
+          set -euo pipefail
+          # 仅在确实产生新提交时推送；镜像已经发布成功，这步失败不影响交付
+          if [ -n "$(git log origin/main..HEAD --oneline)" ]; then
+            git push origin HEAD:main
+            echo "已同步上游提交到本仓库"
+          else
+            echo "无新提交需要推送"
+          fi
+
+      - name: 结果摘要
+        if: always()
+        run: |
+          {
+            echo "### 上游同步结果"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 上游 HEAD | \`${{ steps.upstream.outputs.sha }}\` |"
+            echo "| 镜像标签 | \`sha-${{ steps.upstream.outputs.short }}\` |"
+            echo "| 是否构建 | ${{ steps.gate.outputs.need == 'true' && '是' || '否（已存在，跳过）' }} |"
+            if [ "${{ steps.gate.outputs.need }}" = "true" ]; then
+              echo ""
+              echo "\`\`\`"
+              echo "docker pull ${IMAGE}:sha-${{ steps.upstream.outputs.short }}"
+              echo "\`\`\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
