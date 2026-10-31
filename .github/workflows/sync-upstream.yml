@@ -31,6 +31,7 @@ concurrency:
 
 env:
   IMAGE: yinuxy/ziwei-doushu
+  GHCR_IMAGE: ghcr.io/yinuxy/ziwei-doushu
   UPSTREAM_REPO: https://github.com/Renhuai123/ziwei-doushu.git
 
 jobs:
@@ -39,6 +40,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # 推送到 GitHub Container Registry 需要 packages 写权限
+      packages: write
 
     steps:
       - name: 检出本仓库（完整历史，便于合并上游）
@@ -99,6 +102,14 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: 登录 GitHub Container Registry
+        if: steps.gate.outputs.need == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: 设置 Buildx
         if: steps.gate.outputs.need == 'true'
         uses: docker/setup-buildx-action@v3
@@ -114,6 +125,8 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:sha-${{ steps.upstream.outputs.short }}
             ${{ env.IMAGE }}:latest
+            ${{ env.GHCR_IMAGE }}:sha-${{ steps.upstream.outputs.short }}
+            ${{ env.GHCR_IMAGE }}:latest
           build-args: |
             NEXT_PUBLIC_SITE_URL=${{ vars.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000' }}
           cache-from: type=gha
@@ -126,6 +139,24 @@ jobs:
             org.opencontainers.image.source=https://github.com/Renhuai123/ziwei-doushu
             org.opencontainers.image.revision=${{ steps.upstream.outputs.sha }}
             org.opencontainers.image.licenses=MIT
+
+      - name: 确保 GHCR 包可公开拉取
+        if: steps.gate.outputs.need == 'true'
+        continue-on-error: true
+        run: |
+          # GHCR 首次推送默认创建为 private，这里尝试改为 public。
+          # 即使失败也不影响镜像已推送这一事实，可稍后在
+          # Packages → Package settings → Change visibility 手动调整。
+          code=$(curl -s -o /tmp/ghcr-vis.json -w '%{http_code}' -X PATCH \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/user/packages/container/ziwei-doushu" \
+            -d '{"visibility":"public"}')
+          echo "设置可见性 -> HTTP ${code}"
+          head -c 200 /tmp/ghcr-vis.json || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 将同步结果推回本仓库
         if: steps.gate.outputs.need == 'true'
@@ -154,6 +185,7 @@ jobs:
               echo ""
               echo "\`\`\`"
               echo "docker pull ${IMAGE}:sha-${{ steps.upstream.outputs.short }}"
+              echo "docker pull ${GHCR_IMAGE}:sha-${{ steps.upstream.outputs.short }}"
               echo "\`\`\`"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
