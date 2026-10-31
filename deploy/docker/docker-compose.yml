@@ -1,0 +1,75 @@
+# 紫微斗数 —— 单机部署
+# 用法：
+#   cd deploy/docker
+#   IMAGE_TAG=$(git rev-parse --short HEAD) docker compose up -d --build
+# 变量可用同级 .env 覆盖（HOST_PORT / BIND_ADDR / IMAGE_TAG / NEXT_PUBLIC_SITE_URL）
+
+name: ziwei-doushu
+
+services:
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        NODE_VERSION: "22.22.2"
+        # 构建期变量：决定 sitemap / canonical / robots 里的域名，改它必须 --build
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
+    # 镜像 tag 用 git SHA，保证任何一版都能精确回滚
+    image: ziwei-doushu:${IMAGE_TAG:-local}
+    container_name: ziwei-web
+    restart: unless-stopped
+
+    ports:
+      # 默认只绑本机回环，由外层反代对外；要让外网直连改成 BIND_ADDR=0.0.0.0
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-3000}:3000"
+
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      # 站点绝对地址，影响 sitemap.xml / robots.txt 里生成的链接
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 25s
+
+    # ── 加固：按需保留 ──
+    # 只读根文件系统，仅 /tmp 与 Next 缓存可写。
+    # 若容器起不来且日志出现 EROFS / read-only file system，
+    # 先注释掉 read_only + tmpfs + volumes 三段复测，再逐段加回。
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    volumes:
+      # 具名卷而非 tmpfs：Docker 会继承镜像内 /app/.next/cache 的属主(1001)，
+      # tmpfs 默认 root:root 会让非 root 进程写缓存失败
+      - next-cache:/app/.next/cache
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+          pids: 256
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  next-cache:
+    driver: local

@@ -1,0 +1,93 @@
+name: Docker Publish
+
+# 触发方式：
+#   1. 打 tag（v1.0.0）自动构建并推送，同时打 latest
+#   2. 手动触发（workflow_dispatch），可指定是否覆盖 latest
+#
+# 需要在仓库 Settings → Secrets and variables → Actions 配置：
+#   DOCKERHUB_USERNAME  Docker Hub 用户名
+#   DOCKERHUB_TOKEN     Docker Hub Access Token（不是登录密码）
+# 可选（Variables）：
+#   NEXT_PUBLIC_SITE_URL  站点根地址，构建期固化进 sitemap/robots
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      push_latest:
+        description: '同时推送 latest 标签'
+        type: boolean
+        default: true
+      site_url:
+        description: '站点根地址（留空则用仓库变量或默认值）'
+        type: string
+        required: false
+
+env:
+  IMAGE_NAME: ziwei-doushu
+
+jobs:
+  build-and-push:
+    name: 构建并推送多架构镜像
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 QEMU（arm64 交叉构建）
+        uses: docker/setup-qemu-action@v3
+
+      - name: 设置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 生成镜像标签与元数据
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.push_latest || startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=紫微斗数排盘引擎
+            org.opencontainers.image.description=基于倪海厦《天纪》体系的紫微斗数排盘引擎（开源快照版）
+            org.opencontainers.image.source=https://github.com/Renhuai123/ziwei-doushu
+            org.opencontainers.image.licenses=MIT
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NEXT_PUBLIC_SITE_URL=${{ inputs.site_url || vars.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: 推送结果摘要
+        run: |
+          echo "### 镜像已推送" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "拉取运行：\`docker run -d -p 3000:3000 --name ziwei ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest\`" >> "$GITHUB_STEP_SUMMARY"
