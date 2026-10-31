@@ -1,0 +1,120 @@
+# ============================================================
+# 紫微斗数排盘引擎 —— 本地部署
+#
+# 直接拉取已发布镜像，不需要源码、不需要构建、不需要 Node 环境。
+#
+#   启动：  docker compose up -d
+#   访问：  http://localhost:3000
+#   状态：  docker compose ps
+#   日志：  docker compose logs -f
+#   停止：  docker compose down          （保留缓存卷）
+#   清理：  docker compose down -v       （连缓存卷一起删除）
+#   更新：  docker compose pull && docker compose up -d
+#
+# 镜像：https://hub.docker.com/r/yinuxy/ziwei-doushu
+# ============================================================
+
+name: ziwei-doushu
+
+services:
+  web:
+    # 默认跑最新版；要锁版本就改成 yinuxy/ziwei-doushu:0.1.0
+    # 注意：改了标签必须 docker compose pull 才会真正拉新镜像
+    image: yinuxy/ziwei-doushu:${IMAGE_TAG:-latest}
+    container_name: ziwei-web
+    restart: unless-stopped
+
+    ports:
+      # 只想本机访问就保持 127.0.0.1；要让局域网访问改成 "3000:3000"
+      - "127.0.0.1:${HOST_PORT:-3000}:3000"
+
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+      # ⚠️ 站点域名（NEXT_PUBLIC_SITE_URL）在这里设置【无效】。
+      # 它是构建期变量，已固化在 sitemap.xml / robots.txt / canonical 里，
+      # 当前镜像里写死为 http://localhost:3000。仅影响 SEO 相关输出，
+      # 不影响排盘功能。需要正确域名请自行构建镜像（见文末说明）。
+
+    # ── 安全加固（已实测可用，勿随意删除）──
+    # 只读根文件系统：进程无法篡改自身代码
+    read_only: true
+    tmpfs:
+      # /tmp 可写，sticky 位允许任意用户建临时文件
+      - /tmp:size=64m,mode=1777
+    volumes:
+      # Next 图片优化缓存。必须用具名卷而非 tmpfs：
+      # 镜像内该目录属主是 uid 1001，Docker 挂卷时会继承这个属主，
+      # 用 tmpfs 则默认 root:root，非 root 进程写不进去会直接 500
+      - ziwei-cache:/app/.next/cache
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # 资源上限：防止异常请求把宿主机拖垮
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+          pids: 256
+
+    # 日志轮转：避免容器日志无限增长撑爆磁盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 健康检查由镜像内置的 HEALTHCHECK 提供（30s 间隔，25s 启动宽限），
+    # docker compose ps 里会直接显示 healthy / unhealthy，无需重复定义。
+
+volumes:
+  # 固定卷名，避免不同目录下 compose 项目名不同导致重复创建
+  ziwei-cache:
+    name: ziwei-cache
+
+# ============================================================
+# 最简版（只想先跑起来看看，不需要加固）：
+#
+#   services:
+#     web:
+#       image: yinuxy/ziwei-doushu:latest
+#       ports:
+#         - "3000:3000"
+#       restart: unless-stopped
+#
+# ------------------------------------------------------------
+# 要用自己的域名 + HTTPS，在前面加一层 Caddy（自动签发证书）：
+#
+#   caddy:
+#     image: caddy:2-alpine
+#     restart: unless-stopped
+#     ports:
+#       - "80:80"
+#       - "443:443"
+#     volumes:
+#       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+#       - caddy-data:/data
+#       - caddy-config:/config
+#
+#   Caddyfile 内容：
+#     zw.example.com {
+#         reverse_proxy web:3000
+#     }
+#
+# ------------------------------------------------------------
+# 想要 sitemap / canonical 指向自己的域名（而非 localhost），
+# 需要自行构建镜像，因为该变量在 build 阶段被内联进静态产物：
+#
+#   git clone https://github.com/yinuxy/ziwei-doushu.git
+#   cd ziwei-doushu
+#   docker build -f deploy/docker/Dockerfile \
+#     --build-arg NEXT_PUBLIC_SITE_URL=https://zw.example.com \
+#     -t ziwei-doushu:custom .
+#
+# 然后把上面 image: 改成 ziwei-doushu:custom
+# ============================================================

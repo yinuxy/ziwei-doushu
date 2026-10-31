@@ -83,3 +83,50 @@ jobs:
       - name: 清理
         if: always()
         run: docker rm -f ziwei || true
+
+  compose-smoke:
+    name: 用本地部署 compose 文件验证
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 用 docker-compose.local.yml 启动
+        run: |
+          TAG="${{ inputs.tag || 'latest' }}"
+          echo "使用镜像标签: $TAG"
+          IMAGE_TAG="$TAG" docker compose \
+            -f deploy/docker/docker-compose.local.yml \
+            up -d --wait --wait-timeout 120
+
+      - name: 查看容器状态
+        run: docker compose -f deploy/docker/docker-compose.local.yml ps
+
+      - name: 路由冒烟验证
+        run: bash deploy/docker/verify.sh http://127.0.0.1:3000
+
+      - name: 验证加固项生效
+        run: |
+          set -e
+          uid=$(docker exec ziwei-web id -u)
+          echo "容器内 uid=$uid"
+          [ "$uid" = "1001" ] || { echo "预期非 root(1001)，实际 $uid"; exit 1; }
+
+          if docker exec ziwei-web touch /app/should-fail 2>/dev/null; then
+            echo "根文件系统可写，read_only 未生效"; exit 1
+          fi
+          echo "根文件系统只读，符合预期"
+
+          # 缓存卷必须对 uid 1001 可写，否则图片优化会 500
+          docker exec ziwei-web sh -c 'touch /app/.next/cache/.probe && rm -f /app/.next/cache/.probe'
+          echo "缓存卷可写，符合预期"
+
+      - name: 失败时输出日志
+        if: failure()
+        run: docker compose -f deploy/docker/docker-compose.local.yml logs --tail 80 || true
+
+      - name: 清理
+        if: always()
+        run: docker compose -f deploy/docker/docker-compose.local.yml down -v || true
