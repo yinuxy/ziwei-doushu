@@ -1,0 +1,85 @@
+name: Verify Image
+
+# 从 Docker Hub 拉取已发布镜像，实际运行并验证路由，
+# 确保「能构建」之外还「能跑起来」——包括只读根文件系统这种加固参数。
+#
+# 触发：Docker Publish 成功后自动执行，或手动触发
+
+on:
+  workflow_run:
+    workflows: ["Docker Publish"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要验证的镜像标签'
+        type: string
+        default: latest
+
+jobs:
+  smoke:
+    name: 拉取镜像并冒烟验证
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: 检出代码（复用 verify.sh）
+        uses: actions/checkout@v4
+
+      - name: 拉取镜像
+        run: |
+          TAG="${{ inputs.tag || 'latest' }}"
+          echo "验证镜像: yinuxy/ziwei-doushu:$TAG"
+          docker pull "yinuxy/ziwei-doushu:$TAG"
+
+      - name: 以加固参数运行（只读根 + 非 root + cap_drop）
+        run: |
+          TAG="${{ inputs.tag || 'latest' }}"
+          docker run -d --name ziwei \
+            -p 127.0.0.1:3000:3000 \
+            --read-only \
+            --tmpfs /tmp:size=64m,mode=1777 \
+            -v ziwei-cache:/app/.next/cache \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --memory 512m \
+            "yinuxy/ziwei-doushu:$TAG"
+
+      - name: 等待健康检查通过
+        run: |
+          for i in $(seq 1 30); do
+            health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ziwei 2>/dev/null || echo none)
+            echo "[$i] health=$health"
+            if [ "$health" = "healthy" ]; then
+              echo "健康检查通过"; exit 0
+            fi
+            sleep 3
+          done
+          echo "健康检查未通过，容器日志："
+          docker logs --tail 60 ziwei
+          exit 1
+
+      - name: 路由冒烟验证
+        run: bash deploy/docker/verify.sh http://127.0.0.1:3000
+
+      - name: 验证非 root 运行
+        run: |
+          uid=$(docker exec ziwei id -u)
+          echo "容器内 uid=$uid"
+          [ "$uid" = "1001" ] || { echo "预期非 root(1001)，实际 $uid"; exit 1; }
+
+      - name: 验证只读根文件系统
+        run: |
+          if docker exec ziwei touch /app/should-fail 2>/dev/null; then
+            echo "根文件系统可写，read_only 未生效"; exit 1
+          else
+            echo "根文件系统只读，符合预期"
+          fi
+
+      - name: 失败时输出日志
+        if: failure()
+        run: docker logs --tail 100 ziwei || true
+
+      - name: 清理
+        if: always()
+        run: docker rm -f ziwei || true
